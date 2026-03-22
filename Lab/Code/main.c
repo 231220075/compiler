@@ -4,29 +4,45 @@
 /* flex/bison interfaces */
 extern FILE *yyin;
 extern int yylineno;    
+extern int yyparse(void);
 
-/* pull in scanner implementation so make doesn't need to link lex.yy.o */
 #include "lex.yy.c"
+#include "syntax.tab.h"
 
-/* prototypes provided by lex.yy.c now; duplicate declarations removed */
+void reset_parser_state(void);
+void print_tree(TreeNode *root, int depth);
 
-void scan_file(FILE *file) {
+extern TreeNode *syntax_root;
+extern int has_lexical_error;
+extern int has_syntax_error;
+
+static void parse_file(FILE *file) {
+    reset_parser_state();
     yyin = file;
-    yylineno = 1;        /* reset for each new stream */
+    yylineno = 1;
     yyrestart(yyin);
-    int token;
-    while ((token = yylex()) != 0) {}
+
+    yyparse();
+    if (!has_lexical_error && !has_syntax_error && syntax_root != NULL) {
+        print_tree(syntax_root, 0);
+    }
 }
 
 int main(int argc, char *argv[]){
-    for (int i = 1; i < argc; i++) {
+    int i;
+    if (argc <= 1) {
+        return 0;
+    }
+
+    for (i = 1; i < argc; i++) {
         FILE *file = fopen(argv[i], "r");
         if (file == NULL) {
-            fprintf(stderr, "Error opening file: %s\n", argv[i]);
+            printf("Cannot open file: %s\n", argv[i]);
             continue;
         }
-        scan_file(file);
+        parse_file(file);
         fclose(file);
     }
+
     return 0;
 }

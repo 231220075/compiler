@@ -4,91 +4,100 @@
 #include <string.h>
 #include "syntax.tab.h"   /* token defs, YYSTYPE */
 
-/* codes for relational operators stored in yylval.op */
-#define LE 1
-#define GE 2
-#define EQ 3
-#define NE 4
-#define LT 5
-#define GT 6
+extern YYLTYPE yylloc;
+void report_lexical_error(int line, const char *msg, const char *lexeme);
 
-void yyerror(const char *s);
+#define YY_USER_ACTION yylloc.first_line = yylloc.last_line = yylineno;
 %}
 
-%option yylineno 
+%option yylineno noyywrap
+%x COMMENT
 
 DIGIT    [0-9]
-LETTER   [A-Za-z]
-ID       {LETTER}({LETTER}|{DIGIT}|_){0,51}
-INT_LIT  {DIGIT}+
-FLOAT_LIT {DIGIT}+"."{DIGIT}+
+ID_START [_A-Za-z]
+ID_BODY  [_A-Za-z0-9]
+ID       {ID_START}{ID_BODY}{0,30}
 
-WS       [ \t\r\n]+    
+DEC_INT  0|[1-9]{DIGIT}*
+OCT_INT  0[0-7]+
+HEX_INT  0[xX][0-9a-fA-F]+
+
+FLOAT_DEC ({DIGIT}+\.{DIGIT}*|\.{DIGIT}+)
+FLOAT_EXP ({DIGIT}+\.{DIGIT}*|\.{DIGIT}+)[eE][+-]?{DIGIT}+
+
+BAD_OCT  0[0-7]*[89]{DIGIT}*
+BAD_HEX  0[xX][0-9a-fA-F]*[g-zG-Z_][A-Za-z0-9_]*
+BAD_EXP  ({DIGIT}+\.{DIGIT}*|\.{DIGIT}+)[eE][+-]?
+
+WS       [ \t\r]+
 
 %%
 
 
-{WS}              { /* no actions*/ printf("WS "); }
-
-
-"int"              { printf("int TYPE ");return TYPE; }
-"float"            { printf("float TYPE ");return TYPE; }
-
-"struct"           { printf("STRUCT ");return STRUCT; }
-"return"           { printf("RETURN ");return RETURN; }
-"if"               { printf("IF ");return IF; }
-"else"             { printf("ELSE ");return ELSE; }
-"while"            { printf("WHILE ");return WHILE; }
-
-"&&"               { printf("AND ");return AND; }
-"\|\|"             { printf("OR ");return OR; }
-"!"                { printf("NOT ");return NOT; }
-
-"<="               { printf("LE ");yylval.op = LE; return RELOP; }
-">="               { printf("GE ");yylval.op = GE; return RELOP; }
-"=="               { printf("EQ ");yylval.op = EQ; return RELOP; }
-"!="               { printf("NE ");yylval.op = NE; return RELOP; }
-"<"                { printf("LT ");yylval.op = LT; return RELOP; }
-">"                { printf("GT ");yylval.op = GT; return RELOP; }
-
-";"                { printf("SEMI ");return SEMI; }
-","                { printf("COMMA ");return COMMA; }
-"="                { printf("ASSIGNOP ");return ASSIGNOP; }
-"+"                { printf("PLUS ");return PLUS; }
-"-"                { printf("MINUS ");return MINUS; }
-"*"                { printf("STAR ");return STAR; }
-"/"                { printf("DIV ");return DIV; }
-"("                { printf("LP ");return LP; }
-")"                { printf("RP ");return RP; }
-"["                { printf("LB ");return LB; }
-"]"                { printf("RB ");return RB; }
-"{"                { printf("LC ");return LC; }
-"}"                { printf("RC ");return RC; }
-"."                { printf("DOT ");return DOT; }
-
-{FLOAT_LIT}        { printf("FLOAT_LIT ");yylval.fval = atof(yytext); return FLOAT; }
-{INT_LIT}          { printf("INT_LIT ");yylval.ival = atoi(yytext); return INT; }
-
-{ID}               {
-                     if (strcmp(yytext,"int")==0 || strcmp(yytext,"float")==0 ||
-                         strcmp(yytext,"struct")==0 || strcmp(yytext,"return")==0 ||
-                         strcmp(yytext,"if")==0 || strcmp(yytext,"else")==0 ||
-                         strcmp(yytext,"while")==0) {
-                     }
-                     yylval.sval = strdup(yytext);
-                     printf("ID ");
-                     return ID;
+"//"[^\n]*         { /* skip line comment */ }
+"/*"               { BEGIN(COMMENT); }
+<COMMENT>"*/"      { BEGIN(INITIAL); }
+<COMMENT>\n        { /* yylineno auto increment */ }
+<COMMENT>.         { /* skip comment body */ }
+<COMMENT><<EOF>>   {
+                      report_lexical_error(yylineno, "Unterminated comment", "");
+                      BEGIN(INITIAL);
+                      return 0;
                    }
 
-.                  { yyerror("unknown string"); }
+
+\n                { /* ignore newline, yylineno updates automatically */ }
+{WS}              { /* ignore whitespace */ }
+
+
+"int"             { yylval.sval = strdup(yytext); return TYPE; }
+"float"           { yylval.sval = strdup(yytext); return TYPE; }
+"struct"          { return STRUCT; }
+"return"          { return RETURN; }
+"if"              { return IF; }
+"else"            { return ELSE; }
+"while"           { return WHILE; }
+
+"&&"              { return AND; }
+"||"              { return OR; }
+"!"               { return NOT; }
+
+"<="              { yylval.sval = strdup(yytext); return RELOP; }
+">="              { yylval.sval = strdup(yytext); return RELOP; }
+"=="              { yylval.sval = strdup(yytext); return RELOP; }
+"!="              { yylval.sval = strdup(yytext); return RELOP; }
+"<"               { yylval.sval = strdup(yytext); return RELOP; }
+">"               { yylval.sval = strdup(yytext); return RELOP; }
+
+";"               { return SEMI; }
+","               { return COMMA; }
+"="               { return ASSIGNOP; }
+"+"               { return PLUS; }
+"-"               { return MINUS; }
+"*"               { return STAR; }
+"/"               { return DIV; }
+"("               { return LP; }
+")"               { return RP; }
+"["               { return LB; }
+"]"               { return RB; }
+"{"               { return LC; }
+"}"               { return RC; }
+"."               { return DOT; }
+
+
+{BAD_HEX}         { report_lexical_error(yylineno, "Illegal hexadecimal number", yytext); }
+{BAD_OCT}         { report_lexical_error(yylineno, "Illegal octal number", yytext); }
+{BAD_EXP}         { report_lexical_error(yylineno, "Illegal floating point number", yytext); }
+
+{FLOAT_EXP}       { yylval.fval = strtof(yytext, NULL); return FLOAT; }
+{FLOAT_DEC}       { yylval.fval = strtof(yytext, NULL); return FLOAT; }
+
+{HEX_INT}         { yylval.ival = (int)strtol(yytext, NULL, 16); return INT; }
+{OCT_INT}         { yylval.ival = (int)strtol(yytext, NULL, 8); return INT; }
+{DEC_INT}         { yylval.ival = (int)strtol(yytext, NULL, 10); return INT; }
+
+{ID}              { yylval.sval = strdup(yytext); return ID; }
+
+.                 { report_lexical_error(yylineno, "Mysterious character", yytext); }
 
 %%
-
-
-void yyerror(const char *s) {
-    fprintf(stderr, "line %d: %s at '%s'\n", yylineno, s, yytext);
-}
-
-int yywrap(void) {
-    return 1;
-}

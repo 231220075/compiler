@@ -7,6 +7,21 @@
 extern YYLTYPE yylloc;
 void report_lexical_error(int line, const char *msg, const char *lexeme);
 
+static char *dup_lexeme(const char *s) {
+   size_t n;
+   char *p;
+   if (s == NULL) {
+      return NULL;
+   }
+   n = strlen(s) + 1;
+   p = (char *)malloc(n);
+   if (p == NULL) {
+      return NULL;
+   }
+   memcpy(p, s, n);
+   return p;
+}
+
 #define YY_USER_ACTION yylloc.first_line = yylloc.last_line = yylineno;
 %}
 
@@ -50,8 +65,8 @@ WS       [ \t\r]+
 {WS}              { /* ignore whitespace */ }
 
 
-"int"             { yylval.sval = strdup(yytext); return TYPE; }
-"float"           { yylval.sval = strdup(yytext); return TYPE; }
+"int"             { yylval.sval = dup_lexeme(yytext); return TYPE; }
+"float"           { yylval.sval = dup_lexeme(yytext); return TYPE; }
 "struct"          { return STRUCT; }
 "return"          { return RETURN; }
 "if"              { return IF; }
@@ -62,12 +77,12 @@ WS       [ \t\r]+
 "||"              { return OR; }
 "!"               { return NOT; }
 
-"<="              { yylval.sval = strdup(yytext); return RELOP; }
-">="              { yylval.sval = strdup(yytext); return RELOP; }
-"=="              { yylval.sval = strdup(yytext); return RELOP; }
-"!="              { yylval.sval = strdup(yytext); return RELOP; }
-"<"               { yylval.sval = strdup(yytext); return RELOP; }
-">"               { yylval.sval = strdup(yytext); return RELOP; }
+"<="              { yylval.sval = dup_lexeme(yytext); return RELOP; }
+">="              { yylval.sval = dup_lexeme(yytext); return RELOP; }
+"=="              { yylval.sval = dup_lexeme(yytext); return RELOP; }
+"!="              { yylval.sval = dup_lexeme(yytext); return RELOP; }
+"<"               { yylval.sval = dup_lexeme(yytext); return RELOP; }
+">"               { yylval.sval = dup_lexeme(yytext); return RELOP; }
 
 ";"               { return SEMI; }
 ","               { return COMMA; }
@@ -96,7 +111,7 @@ WS       [ \t\r]+
 {OCT_INT}         { yylval.ival = (int)strtol(yytext, NULL, 8); return INT; }
 {DEC_INT}         { yylval.ival = (int)strtol(yytext, NULL, 10); return INT; }
 
-{ID}              { yylval.sval = strdup(yytext); return ID; }
+{ID}              { yylval.sval = dup_lexeme(yytext); return ID; }
 
 .                 { report_lexical_error(yylineno, "Mysterious character", yytext); }
 

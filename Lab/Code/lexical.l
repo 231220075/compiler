@@ -100,9 +100,24 @@ WS       [ \t\r]+
 "."               { return DOT; }
 
 
-{BAD_HEX}         { report_lexical_error(yylineno, "Illegal hexadecimal number", yytext); }
-{BAD_OCT}         { report_lexical_error(yylineno, "Illegal octal number", yytext); }
-{BAD_EXP}         { report_lexical_error(yylineno, "Illegal floating point number", yytext); }
+{BAD_HEX}         {
+                     report_lexical_error(yylineno, "Illegal hexadecimal number", yytext);
+                     /* Return a placeholder integer token so parser can continue. */
+                     yylval.ival = 0;
+                     return INT;
+                  }
+{BAD_OCT}         {
+                     report_lexical_error(yylineno, "Illegal octal number", yytext);
+                     /* Return a placeholder integer token so parser can continue. */
+                     yylval.ival = 0;
+                     return INT;
+                  }
+{BAD_EXP}         {
+                     report_lexical_error(yylineno, "Illegal floating point number", yytext);
+                     /* Return a placeholder float token so parser can continue. */
+                     yylval.fval = 0.0f;
+                     return FLOAT;
+                  }
 
 {FLOAT_EXP}       { yylval.fval = strtof(yytext, NULL); return FLOAT; }
 {FLOAT_DEC}       { yylval.fval = strtof(yytext, NULL); return FLOAT; }

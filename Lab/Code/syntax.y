@@ -34,6 +34,7 @@ int has_lexical_error = 0;
 int has_syntax_error = 0;
 
 static int last_syntax_error_line = -1;
+static int last_lexical_error_line = -1;
 
 static TreeNode *new_terminal(const char *name, int line, const char *text) {
         TreeNode *node = (TreeNode *)malloc(sizeof(TreeNode));
@@ -139,10 +140,12 @@ void reset_parser_state(void) {
         has_lexical_error = 0;
         has_syntax_error = 0;
         last_syntax_error_line = -1;
+        last_lexical_error_line = -1;
 }
 
 void report_lexical_error(int line, const char *msg, const char *lexeme) {
         has_lexical_error = 1;
+        last_lexical_error_line = line;
         if (lexeme != NULL && lexeme[0] != '\0') {
                 printf("Error type A at Line %d: %s '%s'.\n", line, msg, lexeme);
         } else {
@@ -151,6 +154,9 @@ void report_lexical_error(int line, const char *msg, const char *lexeme) {
 }
 
 void report_syntax_error(int line, const char *msg) {
+        if (line == last_lexical_error_line) {
+                return;
+        }
         if (line == last_syntax_error_line) {
                 return;
         }

@@ -246,6 +246,10 @@ ExtDef
             { $$ = NODE("ExtDef", 2, $1, TOKEN("SEMI", @2.first_line)); }
         | Specifier FunDec CompSt
             { $$ = NODE("ExtDef", 3, $1, $2, $3); }
+                | Specifier FunDec SEMI
+                        { $$ = NODE("ExtDef", 3, $1, $2, TOKEN("SEMI", @3.first_line)); }
+                | StructSpecifier
+                        { $$ = NODE("ExtDef", 1, NODE("Specifier", 1, $1)); }
         | Specifier ExtDecList error
             {
                     report_syntax_error(@3.first_line, "Missing \";\"");

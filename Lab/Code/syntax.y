@@ -11,6 +11,21 @@ typedef struct TreeNode TreeNode;
 #include <string.h>
 #include <stdarg.h>
 
+static char *xstrdup(const char *s) {
+        size_t n;
+        char *p;
+        if (s == NULL) {
+                return NULL;
+        }
+        n = strlen(s) + 1;
+        p = (char *)malloc(n);
+        if (p == NULL) {
+                return NULL;
+        }
+        memcpy(p, s, n);
+        return p;
+}
+
 #ifndef TREE_NODE_TYPEDEF
 #define TREE_NODE_TYPEDEF
 typedef struct TreeNode TreeNode;
@@ -38,10 +53,10 @@ static int last_lexical_error_line = -1;
 
 static TreeNode *new_terminal(const char *name, int line, const char *text) {
         TreeNode *node = (TreeNode *)malloc(sizeof(TreeNode));
-        node->name = strdup(name);
+        node->name = xstrdup(name);
         node->line = line;
         node->is_token = 1;
-        node->text = text ? strdup(text) : NULL;
+        node->text = text ? xstrdup(text) : NULL;
         node->child = NULL;
         node->sibling = NULL;
         return node;
@@ -54,7 +69,7 @@ static TreeNode *new_nonterminal(const char *name, int count, ...) {
         TreeNode *first = NULL;
         TreeNode *tail = NULL;
 
-        node->name = strdup(name);
+        node->name = xstrdup(name);
         node->line = 0;
         node->is_token = 0;
         node->text = NULL;
@@ -247,7 +262,10 @@ ExtDef
         | Specifier FunDec CompSt
             { $$ = NODE("ExtDef", 3, $1, $2, $3); }
                 | Specifier FunDec SEMI
-                        { $$ = NODE("ExtDef", 3, $1, $2, TOKEN("SEMI", @3.first_line)); }
+                        {
+                                        report_syntax_error(@3.first_line, "Function declaration is not allowed");
+                                        $$ = NULL;
+                        }
                 | StructSpecifier
                         { $$ = NODE("ExtDef", 1, NODE("Specifier", 1, $1)); }
         | Specifier ExtDecList error

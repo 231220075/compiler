@@ -4,6 +4,21 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+static char *xstrdup(const char *s) {
+    size_t n;
+    char *p;
+    if (s == NULL) {
+        return NULL;
+    }
+    n = strlen(s) + 1;
+    p = (char *)malloc(n);
+    if (p == NULL) {
+        return NULL;
+    }
+    memcpy(p, s, n);
+    return p;
+}
+
 /* flex/bison interfaces */
 extern FILE *yyin;
 extern int yylineno;
@@ -74,9 +89,7 @@ typedef struct {
 typedef struct {
     char *name;
     Type *type;
-    int declared_line;
-    int defined_line;
-    int is_defined;
+    int line;
 } FuncSymbol;
 
 typedef struct {
@@ -105,6 +118,7 @@ typedef struct {
 #define MAX_FUNCS 512
 #define MAX_STRUCTS 512
 #define MAX_ERRORS 4096
+#define MAX_SCOPES 512
 
 static VarSymbol g_vars[MAX_VARS];
 static int g_var_count = 0;
@@ -115,8 +129,23 @@ static int g_struct_count = 0;
 static ErrorRecord g_errors[MAX_ERRORS];
 static int g_error_count = 0;
 static int g_anon_struct_id = 0;
+static int g_scope_var_base[MAX_SCOPES];
+static int g_scope_top = 1;
 
 static Type *g_error_type = NULL;
+
+static void enter_scope(void) {
+    if (g_scope_top < MAX_SCOPES) {
+        g_scope_var_base[g_scope_top++] = g_var_count;
+    }
+}
+
+static void leave_scope(void) {
+    if (g_scope_top > 1) {
+        g_var_count = g_scope_var_base[g_scope_top - 1];
+        g_scope_top--;
+    }
+}
 
 static TreeNode *child_at(TreeNode *node, int idx) {
     TreeNode *cur = node ? node->child : NULL;
@@ -204,7 +233,7 @@ static Type *make_array_type(Type *elem, int size) {
 
 static Type *make_struct_type(const char *name) {
     Type *t = new_type(TYPE_STRUCT);
-    t->u.struct_name = strdup(name);
+    t->u.struct_name = xstrdup(name);
     return t;
 }
 
@@ -299,7 +328,7 @@ static int is_error(Type *t) {
 }
 
 static VarSymbol *find_var(const char *name) {
-    for (int i = 0; i < g_var_count; i++) {
+    for (int i = g_var_count - 1; i >= 0; i--) {
         if (strcmp(g_vars[i].name, name) == 0) {
             return &g_vars[i];
         }
@@ -326,14 +355,21 @@ static StructSymbol *find_struct(const char *name) {
 }
 
 static int add_var(const char *name, Type *type, int line) {
-    if (find_var(name) != NULL || find_struct(name) != NULL) {
+    int scope_base = g_scope_var_base[g_scope_top - 1];
+    for (int i = g_var_count - 1; i >= scope_base; i--) {
+        if (strcmp(g_vars[i].name, name) == 0) {
+            report_semantic_error(3, line, "redefined variable '%s'", name);
+            return 0;
+        }
+    }
+    if (find_struct(name) != NULL) {
         report_semantic_error(3, line, "redefined variable '%s'", name);
         return 0;
     }
     if (g_var_count >= MAX_VARS) {
         return 0;
     }
-    g_vars[g_var_count].name = strdup(name);
+    g_vars[g_var_count].name = xstrdup(name);
     g_vars[g_var_count].type = copy_type(type);
     g_vars[g_var_count].line = line;
     g_var_count++;
@@ -354,53 +390,19 @@ static int add_struct_symbol(StructSymbol *sym) {
     return 1;
 }
 
-static int same_func_signature(Type *func_t, Type *ret_t, Type **params, int param_count) {
-    if (func_t == NULL || func_t->kind != TYPE_FUNCTION) {
-        return 0;
-    }
-    if (!same_type(func_t->u.func.return_type, ret_t)) {
-        return 0;
-    }
-    if (func_t->u.func.param_count != param_count) {
-        return 0;
-    }
-    for (int i = 0; i < param_count; i++) {
-        if (!same_type(func_t->u.func.param_types[i], params[i])) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static void declare_or_define_function(const char *name, Type *ret_t, Type **params, int param_count, int line, int is_definition) {
+static void define_function(const char *name, Type *ret_t, Type **params, int param_count, int line) {
     FuncSymbol *f = find_func(name);
-    if (f == NULL) {
-        if (g_func_count >= MAX_FUNCS) {
-            return;
-        }
-        g_funcs[g_func_count].name = strdup(name);
-        g_funcs[g_func_count].type = make_function_type(ret_t, params, param_count);
-        g_funcs[g_func_count].declared_line = line;
-        g_funcs[g_func_count].defined_line = is_definition ? line : 0;
-        g_funcs[g_func_count].is_defined = is_definition;
-        g_func_count++;
-        return;
-    }
-
-    if (is_definition && f->is_defined) {
+    if (f != NULL) {
         report_semantic_error(4, line, "redefined function '%s'", name);
         return;
     }
-
-    if (!same_func_signature(f->type, ret_t, params, param_count)) {
-        report_semantic_error(19, line, "conflicting declarations/definition of function '%s'", name);
+    if (g_func_count >= MAX_FUNCS) {
         return;
     }
-
-    if (is_definition) {
-        f->is_defined = 1;
-        f->defined_line = line;
-    }
+    g_funcs[g_func_count].name = xstrdup(name);
+    g_funcs[g_func_count].type = make_function_type(ret_t, params, param_count);
+    g_funcs[g_func_count].line = line;
+    g_func_count++;
 }
 
 static Type *analyze_specifier(TreeNode *specifier, int line);
@@ -410,7 +412,7 @@ static Type *parse_vardec(TreeNode *vardec, Type *base, char **out_name, int lin
     TreeNode *first = child_at(vardec, 0);
     if (is_token(first, "ID")) {
         if (out_name) {
-            *out_name = strdup(first->text);
+            *out_name = xstrdup(first->text);
         }
         return copy_type(base);
     }
@@ -533,7 +535,7 @@ static Type *analyze_struct_specifier(TreeNode *struct_spec, int line) {
                         field_cap *= 2;
                         fields = (FieldSymbol *)realloc(fields, sizeof(FieldSymbol) * field_cap);
                     }
-                    fields[field_count].name = fname ? strdup(fname) : strdup("");
+                    fields[field_count].name = fname ? xstrdup(fname) : xstrdup("");
                     fields[field_count].type = copy_type(ft);
                     field_count++;
                 }
@@ -552,7 +554,7 @@ static Type *analyze_struct_specifier(TreeNode *struct_spec, int line) {
     }
 
     StructSymbol sym;
-    sym.name = strdup(struct_name);
+    sym.name = xstrdup(struct_name);
     sym.fields = fields;
     sym.field_count = field_count;
     sym.line = line;
@@ -872,7 +874,7 @@ static void analyze_stmtlist(TreeNode *stmtlist, Type *func_ret_type) {
     }
 }
 
-static void analyze_compst(TreeNode *compst, Type *func_ret_type) {
+static void analyze_compst_body(TreeNode *compst, Type *func_ret_type) {
     if (!compst || !is_nonterminal(compst, "CompSt")) {
         return;
     }
@@ -887,6 +889,12 @@ static void analyze_compst(TreeNode *compst, Type *func_ret_type) {
     }
     analyze_deflist(deflist);
     analyze_stmtlist(stmtlist, func_ret_type);
+}
+
+static void analyze_compst(TreeNode *compst, Type *func_ret_type) {
+    enter_scope();
+    analyze_compst_body(compst, func_ret_type);
+    leave_scope();
 }
 
 static void analyze_stmt(TreeNode *stmt, Type *func_ret_type) {
@@ -963,7 +971,7 @@ static void analyze_extdeclist(TreeNode *extdeclist, Type *base_type, int line) 
 
 static void analyze_fundec_signature(TreeNode *fundec, Type ***out_param_types, char ***out_param_names, int *out_param_count, char **out_func_name, int line) {
     TreeNode *id_node = child_at(fundec, 0);
-    *out_func_name = (id_node && id_node->text) ? strdup(id_node->text) : strdup("");
+    *out_func_name = (id_node && id_node->text) ? xstrdup(id_node->text) : xstrdup("");
     *out_param_types = NULL;
     *out_param_names = NULL;
     *out_param_count = 0;
@@ -1007,20 +1015,6 @@ static void analyze_extdef(TreeNode *extdef) {
         return;
     }
 
-    if (cc == 3 && is_nonterminal(c1, "FunDec") && is_token(c2, "SEMI")) {
-        Type *ret_type = analyze_specifier(spec, extdef->line);
-        Type **param_types = NULL;
-        char **param_names = NULL;
-        int param_count = 0;
-        char *func_name = NULL;
-        analyze_fundec_signature(c1, &param_types, &param_names, &param_count, &func_name, extdef->line);
-        declare_or_define_function(func_name, ret_type, param_types, param_count, extdef->line, 0);
-        free(param_types);
-        free(param_names);
-        free(func_name);
-        return;
-    }
-
     if (cc == 3 && is_nonterminal(c1, "FunDec") && is_nonterminal(c2, "CompSt")) {
         Type *ret_type = analyze_specifier(spec, extdef->line);
         Type **param_types = NULL;
@@ -1029,15 +1023,17 @@ static void analyze_extdef(TreeNode *extdef) {
         char *func_name = NULL;
 
         analyze_fundec_signature(c1, &param_types, &param_names, &param_count, &func_name, extdef->line);
-        declare_or_define_function(func_name, ret_type, param_types, param_count, extdef->line, 1);
+        define_function(func_name, ret_type, param_types, param_count, extdef->line);
 
+        enter_scope();
         for (int i = 0; i < param_count; i++) {
             if (param_names[i]) {
                 add_var(param_names[i], param_types[i], extdef->line);
             }
         }
 
-        analyze_compst(c2, ret_type);
+        analyze_compst_body(c2, ret_type);
+        leave_scope();
 
         free(param_types);
         free(param_names);
@@ -1064,12 +1060,6 @@ static void analyze_program(TreeNode *program) {
         return;
     }
     analyze_extdeflist(child_at(program, 0));
-
-    for (int i = 0; i < g_func_count; i++) {
-        if (!g_funcs[i].is_defined) {
-            report_semantic_error(18, g_funcs[i].declared_line, "function '%s' declared but not defined", g_funcs[i].name);
-        }
-    }
 }
 
 static void reset_semantic_state(void) {
@@ -1079,6 +1069,8 @@ static void reset_semantic_state(void) {
     g_struct_count = 0;
     g_error_count = 0;
     g_anon_struct_id = 0;
+    g_scope_top = 1;
+    g_scope_var_base[0] = 0;
 }
 
 static void parse_file(FILE *file) {

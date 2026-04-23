@@ -1,0 +1,26 @@
+int helper(int a)
+{
+    int k;
+    k = a;
+    return k;
+}
+
+int helper(float a)
+{
+    return 0;
+}
+
+int main()
+{
+    int i;
+    int j;
+    int i;
+    int a[2];
+    float f;
+
+    a = f;
+    if (a)
+        j = 1;
+
+    return f;
+}

@@ -1,0 +1,17 @@
+int sum(int a, int b)
+{
+    return a + b;
+}
+
+int main()
+{
+    int x;
+    float y;
+
+    x = sum(1);
+    x = sum(y, 2);
+    x = sum(1, 2, 3);
+    x = sum;
+
+    return 0;
+}

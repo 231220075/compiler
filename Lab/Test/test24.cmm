@@ -1,0 +1,35 @@
+struct S
+{
+    int x;
+    float y;
+}
+
+int foo(int a, float b)
+{
+    int z;
+    z = a + b;
+    return b;
+}
+
+int main()
+{
+    int v;
+    float f;
+    int arr[5];
+    struct S s;
+
+    v = u + 1;
+    bar();
+    v(1);
+    10 = v;
+    arr[1.2] = 3;
+    v[0] = 1;
+    v = f.x;
+    v = s.missing;
+    v = f;
+
+    if (f)
+        v = v + f;
+
+    return f;
+}

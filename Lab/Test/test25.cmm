@@ -1,0 +1,17 @@
+struct Bad
+{
+    int a;
+    float b = 1.0;
+    int a;
+}
+
+struct Bad
+{
+    int c;
+}
+
+int main()
+{
+    struct Missing m;
+    return 0;
+}

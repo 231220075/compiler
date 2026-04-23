@@ -1,0 +1,19 @@
+struct Node
+{
+    int val;
+}
+
+int id(int x)
+{
+    return x;
+}
+
+int main()
+{
+    int a;
+    struct Node n;
+
+    a = id(1);
+    n.val = a;
+    return n.val;
+}

@@ -327,6 +327,178 @@ static int is_error(Type *t) {
     return t && t->kind == TYPE_ERROR;
 }
 
+typedef struct {
+    char *place;
+    Type *type;
+    int is_lvalue;
+    int is_address;
+} GenInfo;
+
+static int g_temp_count = 1;
+static int g_label_count = 1;
+
+static char *new_temp(void) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "t%d", g_temp_count++);
+    return xstrdup(buf);
+}
+
+static char *new_label(void) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "label%d", g_label_count++);
+    return xstrdup(buf);
+}
+
+static FILE *g_out = NULL;
+
+static void emit(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (g_out) {
+        vfprintf(g_out, fmt, ap);
+        fprintf(g_out, "\n");
+    } else {
+        vprintf(fmt, ap);
+        printf("\n");
+    }
+    va_end(ap);
+}
+
+static char *op_const(int value) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "#%d", value);
+    return xstrdup(buf);
+}
+
+static StructSymbol *find_struct(const char *name);
+
+static int type_size(Type *t) {
+    if (t == NULL) {
+        return 0;
+    }
+    switch (t->kind) {
+        case TYPE_BASIC:
+            return 4;
+        case TYPE_ARRAY:
+            return t->u.array.size * type_size(t->u.array.elem);
+        case TYPE_STRUCT: {
+            StructSymbol *sym = find_struct(t->u.struct_name);
+            if (sym == NULL) {
+                return 0;
+            }
+            int total = 0;
+            for (int i = 0; i < sym->field_count; i++) {
+                total += type_size(sym->fields[i].type);
+            }
+            return total;
+        }
+        default:
+            return 0;
+    }
+}
+
+static int is_supported_param_type(Type *t) {
+    if (t == NULL) {
+        return 0;
+    }
+    if (t->kind == TYPE_BASIC) {
+        return 1;
+    }
+    if (t->kind == TYPE_ARRAY) {
+        return t->u.array.elem && t->u.array.elem->kind == TYPE_BASIC;
+    }
+    return 0;
+}
+
+static int is_addressable(Type *t) {
+    return t && (t->kind == TYPE_BASIC || t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT);
+}
+
+static GenInfo make_geninfo(char *place, Type *type, int is_lvalue, int is_address) {
+    GenInfo info;
+    info.place = place;
+    info.type = type;
+    info.is_lvalue = is_lvalue;
+    info.is_address = is_address;
+    return info;
+}
+
+static GenInfo make_error_gen(void) {
+    return make_geninfo(xstrdup("#0"), make_error_type(), 0, 0);
+}
+
+static char *ensure_value(GenInfo in) {
+    if (!in.is_address) {
+        return xstrdup(in.place);
+    }
+    char *tmp = new_temp();
+    emit("%s := *%s", tmp, in.place);
+    return tmp;
+}
+
+static void emit_cond_jump(GenInfo cond, const char *label, int when_true) {
+    char *place = ensure_value(cond);
+    if (when_true) {
+        emit("IF %s != #0 GOTO %s", place, label);
+    } else {
+        emit("IF %s == #0 GOTO %s", place, label);
+    }
+    free(place);
+}
+
+static void emit_bool_assign(const char *target, const char *left, const char *op, const char *right) {
+    char *l1 = new_label();
+    char *l2 = new_label();
+    emit("%s := #0", target);
+    emit("IF %s %s %s GOTO %s", left, op, right, l1);
+    emit("GOTO %s", l2);
+    emit("LABEL %s :", l1);
+    emit("%s := #1", target);
+    emit("LABEL %s :", l2);
+    free(l1);
+    free(l2);
+}
+
+static Type *copy_type(Type *src);
+
+typedef struct {
+    char *name;
+    Type *type;
+} GenVar;
+
+static GenVar *g_gen_vars = NULL;
+static int g_gen_var_count = 0;
+static int g_gen_var_cap = 0;
+
+static void gen_clear_vars(void) {
+    for (int i = 0; i < g_gen_var_count; i++) {
+        free(g_gen_vars[i].name);
+    }
+    free(g_gen_vars);
+    g_gen_vars = NULL;
+    g_gen_var_count = 0;
+    g_gen_var_cap = 0;
+}
+
+static void gen_add_var(const char *name, Type *type) {
+    if (g_gen_var_count >= g_gen_var_cap) {
+        g_gen_var_cap = g_gen_var_cap ? g_gen_var_cap * 2 : 8;
+        g_gen_vars = (GenVar *)realloc(g_gen_vars, sizeof(GenVar) * g_gen_var_cap);
+    }
+    g_gen_vars[g_gen_var_count].name = xstrdup(name);
+    g_gen_vars[g_gen_var_count].type = copy_type(type);
+    g_gen_var_count++;
+}
+
+static Type *gen_find_var(const char *name) {
+    for (int i = g_gen_var_count - 1; i >= 0; i--) {
+        if (strcmp(g_gen_vars[i].name, name) == 0) {
+            return g_gen_vars[i].type;
+        }
+    }
+    return NULL;
+}
+
 static VarSymbol *find_var(const char *name) {
     for (int i = g_var_count - 1; i >= 0; i--) {
         if (strcmp(g_vars[i].name, name) == 0) {
@@ -979,6 +1151,12 @@ static void analyze_fundec_signature(TreeNode *fundec, Type ***out_param_types, 
     if (child_count(fundec) == 4) {
         TreeNode *varlist = child_at(fundec, 2);
         collect_params_from_varlist(varlist, out_param_types, out_param_names, out_param_count, line);
+        for (int i = 0; i < *out_param_count; i++) {
+            if (!is_supported_param_type((*out_param_types)[i])) {
+                report_semantic_error(9, line, "function '%s' arguments mismatched", *out_func_name);
+                break;
+            }
+        }
     }
 }
 
@@ -1055,11 +1233,472 @@ static void analyze_extdeflist(TreeNode *extdeflist) {
     }
 }
 
+static int field_offset(StructSymbol *sym, const char *field) {
+    if (!sym || !field) {
+        return -1;
+    }
+    int offset = 0;
+    for (int i = 0; i < sym->field_count; i++) {
+        if (strcmp(sym->fields[i].name, field) == 0) {
+            return offset;
+        }
+        offset += type_size(sym->fields[i].type);
+    }
+    return -1;
+}
+
+static GenInfo gen_exp(TreeNode *exp, Type *current_ret_type);
+static void generate_stmt(TreeNode *stmt, Type *func_ret_type);
+
+static GenInfo gen_exp(TreeNode *exp, Type *current_ret_type) {
+    if (!exp) {
+        return make_error_gen();
+    }
+    int cc = child_count(exp);
+    TreeNode *c0, *c1, *c2, *c3;
+
+    if (cc == 1) {
+        c0 = child_at(exp, 0);
+        if (is_token(c0, "ID")) {
+            Type *t = gen_find_var(c0->text);
+            if (t) {
+                return make_geninfo(xstrdup(c0->text), copy_type(t), 1, 0);
+            }
+            return make_geninfo(xstrdup(c0->text), make_basic_type(BASIC_INT), 1, 0);
+        }
+        if (is_token(c0, "INT")) {
+            return make_geninfo(op_const(atoi(c0->text)), make_basic_type(BASIC_INT), 0, 0);
+        }
+        if (is_token(c0, "FLOAT")) {
+            return make_geninfo(op_const(0), make_basic_type(BASIC_FLOAT), 0, 0);
+        }
+    }
+
+    if (cc == 2) {
+        c0 = child_at(exp, 0);
+        c1 = child_at(exp, 1);
+        if (is_token(c0, "MINUS")) {
+            GenInfo e = gen_exp(c1, current_ret_type);
+            char *value = ensure_value(e);
+            char *tmp = new_temp();
+            emit("%s := #0 - %s", tmp, value);
+            free(value);
+            return make_geninfo(tmp, copy_type(e.type), 0, 0);
+        }
+        if (is_token(c0, "NOT")) {
+            GenInfo e = gen_exp(c1, current_ret_type);
+            char *value = ensure_value(e);
+            char *tmp = new_temp();
+            char *l1 = new_label();
+            char *l2 = new_label();
+            emit("%s := #0", tmp);
+            emit("IF %s == #0 GOTO %s", value, l1);
+            emit("GOTO %s", l2);
+            emit("LABEL %s :", l1);
+            emit("%s := #1", tmp);
+            emit("LABEL %s :", l2);
+            free(value);
+            free(l1);
+            free(l2);
+            return make_geninfo(tmp, make_basic_type(BASIC_INT), 0, 0);
+        }
+    }
+
+    if (cc == 3) {
+        c0 = child_at(exp, 0);
+        c1 = child_at(exp, 1);
+        c2 = child_at(exp, 2);
+
+        if (is_token(c0, "LP") && is_nonterminal(c1, "Exp") && is_token(c2, "RP")) {
+            return gen_exp(c1, current_ret_type);
+        }
+
+        if (is_nonterminal(c0, "Exp") && is_token(c1, "ASSIGNOP") && is_nonterminal(c2, "Exp")) {
+            GenInfo left = gen_exp(c0, current_ret_type);
+            GenInfo right = gen_exp(c2, current_ret_type);
+            char *value = ensure_value(right);
+            if (left.is_address) {
+                emit("*%s := %s", left.place, value);
+            } else {
+                emit("%s := %s", left.place, value);
+            }
+            free(value);
+            return make_geninfo(xstrdup(right.place), copy_type(left.type), 0, 0);
+        }
+
+        if (is_nonterminal(c0, "Exp") && (is_token(c1, "AND") || is_token(c1, "OR")) && is_nonterminal(c2, "Exp")) {
+            GenInfo a = gen_exp(c0, current_ret_type);
+            GenInfo b = gen_exp(c2, current_ret_type);
+            char *left = ensure_value(a);
+            char *right = ensure_value(b);
+            char *tmp = new_temp();
+            if (is_token(c1, "AND")) {
+                emit("%s := %s * %s", tmp, left, right);
+            } else {
+                emit("%s := %s + %s", tmp, left, right);
+            }
+            free(left);
+            free(right);
+            return make_geninfo(tmp, make_basic_type(BASIC_INT), 0, 0);
+        }
+
+        if (is_nonterminal(c0, "Exp") && is_token(c1, "RELOP") && is_nonterminal(c2, "Exp")) {
+            GenInfo a = gen_exp(c0, current_ret_type);
+            GenInfo b = gen_exp(c2, current_ret_type);
+            char *left = ensure_value(a);
+            char *right = ensure_value(b);
+            char *tmp = new_temp();
+            emit_bool_assign(tmp, left, c1->text, right);
+            free(left);
+            free(right);
+            return make_geninfo(tmp, make_basic_type(BASIC_INT), 0, 0);
+        }
+
+        if (is_nonterminal(c0, "Exp") && (is_token(c1, "PLUS") || is_token(c1, "MINUS") || is_token(c1, "STAR") || is_token(c1, "DIV")) && is_nonterminal(c2, "Exp")) {
+            GenInfo a = gen_exp(c0, current_ret_type);
+            GenInfo b = gen_exp(c2, current_ret_type);
+            char *left = ensure_value(a);
+            char *right = ensure_value(b);
+            char *tmp = new_temp();
+            const char *op = is_token(c1, "PLUS") ? "+" : is_token(c1, "MINUS") ? "-" : is_token(c1, "STAR") ? "*" : "/";
+            emit("%s := %s %s %s", tmp, left, op, right);
+            free(left);
+            free(right);
+            return make_geninfo(tmp, copy_type(a.type), 0, 0);
+        }
+
+        if (is_nonterminal(c0, "Exp") && is_token(c1, "DOT") && is_token(c2, "ID")) {
+            GenInfo base = gen_exp(c0, current_ret_type);
+            if (base.type && base.type->kind == TYPE_STRUCT) {
+                StructSymbol *sym = find_struct(base.type->u.struct_name);
+                int offset = field_offset(sym, c2->text);
+                if (offset >= 0) {
+                    char *tmp = new_temp();
+                    emit("%s := %s + #%d", tmp, base.place, offset);
+                    return make_geninfo(tmp, copy_type(sym->fields[find_field_index(sym, c2->text)].type), 1, 1);
+                }
+            }
+            return make_error_gen();
+        }
+
+        if (is_token(c0, "ID") && is_token(c1, "LP") && is_token(c2, "RP")) {
+            FuncSymbol *f = find_func(c0->text);
+            if (f == NULL) {
+                return make_error_gen();
+            }
+            if (strcmp(c0->text, "read") == 0) {
+                char *tmp = new_temp();
+                emit("READ %s", tmp);
+                return make_geninfo(tmp, make_basic_type(BASIC_INT), 0, 0);
+            }
+            char *tmp = new_temp();
+            emit("%s := CALL %s", tmp, c0->text);
+            return make_geninfo(tmp, copy_type(f->type->u.func.return_type), 0, 0);
+        }
+    }
+
+    if (cc == 4) {
+        c0 = child_at(exp, 0);
+        c1 = child_at(exp, 1);
+        c2 = child_at(exp, 2);
+        c3 = child_at(exp, 3);
+
+        if (is_nonterminal(c0, "Exp") && is_token(c1, "LB") && is_nonterminal(c2, "Exp") && is_token(c3, "RB")) {
+            GenInfo arr = gen_exp(c0, current_ret_type);
+            GenInfo idx = gen_exp(c2, current_ret_type);
+            char *index_value = ensure_value(idx);
+            int elem_size = type_size(arr.type ? arr.type->u.array.elem : NULL);
+            char *addr = new_temp();
+            if (elem_size == 1) {
+                emit("%s := %s + %s", addr, arr.place, index_value);
+            } else {
+                char *offset = new_temp();
+                emit("%s := %s * #%d", offset, index_value, elem_size);
+                emit("%s := %s + %s", addr, arr.place, offset);
+                free(offset);
+            }
+            free(index_value);
+            return make_geninfo(addr, copy_type(arr.type ? arr.type->u.array.elem : NULL), 1, 1);
+        }
+
+        if (is_token(c0, "ID") && is_token(c1, "LP") && is_nonterminal(c2, "Args") && is_token(c3, "RP")) {
+            if (strcmp(c0->text, "write") == 0) {
+                int cap = 8;
+                int n = 0;
+                TreeNode *cur = c2;
+                GenInfo *args = (GenInfo *)malloc(sizeof(GenInfo) * cap);
+                while (cur && is_nonterminal(cur, "Args")) {
+                    if (n >= cap) {
+                        cap *= 2;
+                        args = (GenInfo *)realloc(args, sizeof(GenInfo) * cap);
+                    }
+                    args[n++] = gen_exp(child_at(cur, 0), current_ret_type);
+                    if (child_count(cur) == 3) {
+                        cur = child_at(cur, 2);
+                    } else {
+                        break;
+                    }
+                }
+                for (int i = n - 1; i >= 0; i--) {
+                    char *value = ensure_value(args[i]);
+                    emit("WRITE %s", value);
+                    free(value);
+                }
+                free(args);
+                return make_geninfo(op_const(0), make_basic_type(BASIC_INT), 0, 0);
+            }
+            FuncSymbol *f = find_func(c0->text);
+            if (f == NULL) {
+                return make_error_gen();
+            }
+            int cap = 8;
+            int n = 0;
+            TreeNode *cur = c2;
+            GenInfo *args = (GenInfo *)malloc(sizeof(GenInfo) * cap);
+            while (cur && is_nonterminal(cur, "Args")) {
+                if (n >= cap) {
+                    cap *= 2;
+                    args = (GenInfo *)realloc(args, sizeof(GenInfo) * cap);
+                }
+                args[n++] = gen_exp(child_at(cur, 0), current_ret_type);
+                if (child_count(cur) == 3) {
+                    cur = child_at(cur, 2);
+                } else {
+                    break;
+                }
+            }
+            for (int i = n - 1; i >= 0; i--) {
+                GenInfo arg = args[i];
+                Type *param = (i < f->type->u.func.param_count) ? f->type->u.func.param_types[i] : NULL;
+                if (param && (param->kind == TYPE_ARRAY || param->kind == TYPE_STRUCT) && !arg.is_address) {
+                    emit("ARG &%s", arg.place);
+                } else {
+                    char *value = ensure_value(arg);
+                    emit("ARG %s", value);
+                    free(value);
+                }
+            }
+            free(args);
+            char *tmp = new_temp();
+            emit("%s := CALL %s", tmp, c0->text);
+            return make_geninfo(tmp, copy_type(f->type->u.func.return_type), 0, 0);
+        }
+    }
+
+    return make_error_gen();
+}
+
+static void generate_deflist(TreeNode *deflist) {
+    TreeNode *dl = deflist;
+    while (dl && is_nonterminal(dl, "DefList")) {
+        TreeNode *def = child_at(dl, 0);
+        if (is_nonterminal(def, "Def")) {
+            TreeNode *spec = child_at(def, 0);
+            TreeNode *declist = child_at(def, 1);
+            Type *base = analyze_specifier(spec, def->line);
+            TreeNode *cur = declist;
+            while (cur && is_nonterminal(cur, "DecList")) {
+                TreeNode *dec = child_at(cur, 0);
+                TreeNode *vardec = child_at(dec, 0);
+                char *name = NULL;
+                Type *vt = parse_vardec(vardec, base, &name, def->line);
+                if (name) {
+                    gen_add_var(name, vt);
+                    if (vt && (vt->kind == TYPE_ARRAY || vt->kind == TYPE_STRUCT)) {
+                        emit("DEC %s %d", name, type_size(vt));
+                    }
+                    if (child_count(dec) == 3) {
+                        GenInfo rhs = gen_exp(child_at(dec, 2), NULL);
+                        char *value = ensure_value(rhs);
+                        emit("%s := %s", name, value);
+                        free(value);
+                    }
+                }
+                if (child_count(cur) == 3) {
+                    cur = child_at(cur, 2);
+                } else {
+                    break;
+                }
+            }
+        }
+        TreeNode *next = child_at(dl, 1);
+        if (next && is_nonterminal(next, "DefList")) {
+            dl = next;
+        } else {
+            break;
+        }
+    }
+}
+
+static void generate_stmtlist(TreeNode *stmtlist, Type *func_ret_type) {
+    TreeNode *sl = stmtlist;
+    while (sl && is_nonterminal(sl, "StmtList")) {
+        TreeNode *stmt = child_at(sl, 0);
+        if (stmt && is_nonterminal(stmt, "Stmt")) {
+            generate_stmt(stmt, func_ret_type);
+        }
+        TreeNode *next = child_at(sl, 1);
+        if (next && is_nonterminal(next, "StmtList")) {
+            sl = next;
+        } else {
+            break;
+        }
+    }
+}
+
+static void generate_compst_body(TreeNode *compst, Type *func_ret_type) {
+    if (!compst || !is_nonterminal(compst, "CompSt")) {
+        return;
+    }
+    TreeNode *deflist = NULL;
+    TreeNode *stmtlist = NULL;
+    for (TreeNode *c = compst->child; c != NULL; c = c->sibling) {
+        if (is_nonterminal(c, "DefList")) {
+            deflist = c;
+        } else if (is_nonterminal(c, "StmtList")) {
+            stmtlist = c;
+        }
+    }
+    generate_deflist(deflist);
+    generate_stmtlist(stmtlist, func_ret_type);
+}
+
+static void generate_stmt(TreeNode *stmt, Type *func_ret_type) {
+    if (!stmt || !is_nonterminal(stmt, "Stmt")) {
+        return;
+    }
+    int cc = child_count(stmt);
+    TreeNode *c0 = child_at(stmt, 0);
+
+    if (cc == 1 && is_nonterminal(c0, "CompSt")) {
+        generate_compst_body(c0, func_ret_type);
+        return;
+    }
+
+    if (cc == 2 && is_nonterminal(c0, "Exp")) {
+        gen_exp(c0, func_ret_type);
+        return;
+    }
+
+    if (cc == 3 && is_token(c0, "RETURN")) {
+        GenInfo e = gen_exp(child_at(stmt, 1), func_ret_type);
+        char *value = ensure_value(e);
+        emit("RETURN %s", value);
+        free(value);
+        return;
+    }
+
+    if (cc == 5 && is_token(c0, "IF")) {
+        GenInfo cond = gen_exp(child_at(stmt, 2), func_ret_type);
+        char *else_label = new_label();
+        char *end_label = new_label();
+        emit_cond_jump(cond, else_label, 0);
+        generate_stmt(child_at(stmt, 4), func_ret_type);
+        emit("GOTO %s", end_label);
+        emit("LABEL %s :", else_label);
+        emit("LABEL %s :", end_label);
+        free(else_label);
+        free(end_label);
+        return;
+    }
+
+    if (cc == 7 && is_token(c0, "IF")) {
+        GenInfo cond = gen_exp(child_at(stmt, 2), func_ret_type);
+        char *else_label = new_label();
+        char *end_label = new_label();
+        emit_cond_jump(cond, else_label, 0);
+        generate_stmt(child_at(stmt, 4), func_ret_type);
+        emit("GOTO %s", end_label);
+        emit("LABEL %s :", else_label);
+        generate_stmt(child_at(stmt, 6), func_ret_type);
+        emit("LABEL %s :", end_label);
+        free(else_label);
+        free(end_label);
+        return;
+    }
+
+    if (cc == 5 && is_token(c0, "WHILE")) {
+        char *begin_label = new_label();
+        char *true_label = new_label();
+        char *end_label = new_label();
+        emit("LABEL %s :", begin_label);
+        GenInfo cond = gen_exp(child_at(stmt, 2), func_ret_type);
+        emit_cond_jump(cond, true_label, 1);
+        emit("GOTO %s", end_label);
+        emit("LABEL %s :", true_label);
+        generate_stmt(child_at(stmt, 4), func_ret_type);
+        emit("GOTO %s", begin_label);
+        emit("LABEL %s :", end_label);
+        free(begin_label);
+        free(true_label);
+        free(end_label);
+        return;
+    }
+}
+
+static void generate_extdef(TreeNode *extdef) {
+    if (!extdef || !is_nonterminal(extdef, "ExtDef")) {
+        return;
+    }
+    int cc = child_count(extdef);
+    TreeNode *spec = child_at(extdef, 0);
+    TreeNode *c1 = child_at(extdef, 1);
+    TreeNode *c2 = child_at(extdef, 2);
+
+    if (cc == 3 && is_nonterminal(c1, "FunDec") && is_nonterminal(c2, "CompSt")) {
+        gen_clear_vars();
+        char *func_name = NULL;
+        Type **param_types = NULL;
+        char **param_names = NULL;
+        int param_count = 0;
+        analyze_fundec_signature(c1, &param_types, &param_names, &param_count, &func_name, extdef->line);
+        emit("FUNCTION %s :", func_name);
+        for (int i = 0; i < param_count; i++) {
+            emit("PARAM %s", param_names[i]);
+            gen_add_var(param_names[i], param_types[i]);
+        }
+        Type *ret_type = analyze_specifier(spec, extdef->line);
+        generate_compst_body(c2, ret_type);
+        for (int i = 0; i < param_count; i++) {
+            free(param_names[i]);
+        }
+        free(param_names);
+        free(param_types);
+        free(func_name);
+        return;
+    }
+
+    if (cc == 3 && is_nonterminal(c1, "ExtDecList") && is_token(c2, "SEMI")) {
+        /* Global declarations are not emitted for current IR design. */
+        return;
+    }
+}
+
+static void generate_extdeflist(TreeNode *extdeflist) {
+    TreeNode *cur = extdeflist;
+    while (cur && is_nonterminal(cur, "ExtDefList")) {
+        generate_extdef(child_at(cur, 0));
+        TreeNode *next = child_at(cur, 1);
+        if (next && is_nonterminal(next, "ExtDefList")) {
+            cur = next;
+        } else {
+            break;
+        }
+    }
+}
+
 static void analyze_program(TreeNode *program) {
     if (!program || !is_nonterminal(program, "Program")) {
         return;
     }
     analyze_extdeflist(child_at(program, 0));
+}
+
+static void generate_program(TreeNode *program) {
+    if (!program || !is_nonterminal(program, "Program")) {
+        return;
+    }
+    generate_extdeflist(child_at(program, 0));
 }
 
 static void reset_semantic_state(void) {
@@ -1071,6 +1710,14 @@ static void reset_semantic_state(void) {
     g_anon_struct_id = 0;
     g_scope_top = 1;
     g_scope_var_base[0] = 0;
+    g_temp_count = 1;
+    g_label_count = 1;
+
+    Type *read_ret = make_basic_type(BASIC_INT);
+    define_function("read", read_ret, NULL, 0, 0);
+    Type *write_param = make_basic_type(BASIC_INT);
+    Type *write_params[1] = { write_param };
+    define_function("write", read_ret, write_params, 1, 0);
 }
 
 static void parse_file(FILE *file) {
@@ -1084,23 +1731,43 @@ static void parse_file(FILE *file) {
     yyparse();
     if (!has_lexical_error && !has_syntax_error && syntax_root != NULL) {
         analyze_program(syntax_root);
+        if (!has_semantic_error) {
+            /* Generate intermediate code only when parsing and semantic analysis succeed. */
+            /* Code generation routines are defined after semantic traversal. */
+            /* We flush IR for this input file to stdout. */
+            extern void generate_program(TreeNode *program);
+            generate_program(syntax_root);
+        }
     }
 }
 
 int main(int argc, char *argv[]) {
-    if (argc <= 1) {
-        return 0;
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "Usage: %s <input> [output]\n", argv[0]);
+        return 1;
     }
 
-    for (int i = 1; i < argc; i++) {
-        FILE *file = fopen(argv[i], "r");
-        if (file == NULL) {
-            printf("Cannot open file: %s\n", argv[i]);
-            continue;
+    FILE *input = fopen(argv[1], "r");
+    if (input == NULL) {
+        fprintf(stderr, "Cannot open input file: %s\n", argv[1]);
+        return 1;
+    }
+
+    if (argc == 3) {
+        g_out = fopen(argv[2], "w");
+        if (g_out == NULL) {
+            fprintf(stderr, "Cannot open output file: %s\n", argv[2]);
+            fclose(input);
+            return 1;
         }
-        parse_file(file);
-        fclose(file);
     }
 
+    parse_file(input);
+
+    fclose(input);
+    if (g_out) {
+        fclose(g_out);
+        g_out = NULL;
+    }
     return 0;
 }
